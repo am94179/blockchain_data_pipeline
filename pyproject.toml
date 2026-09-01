@@ -1,0 +1,18 @@
+[project]
+name = "blockchain"
+version = "0.1.0"
+description = "Blockchain Analytics Pipeline"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pyspark>=4.2.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.0",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["spark"]

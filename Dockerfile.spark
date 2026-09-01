@@ -1,0 +1,11 @@
+FROM apache/spark:3.5.5-java17-python3
+
+ARG ICEBERG_VERSION=1.7.1
+
+USER root
+
+# This runtime bundle contains Iceberg Spark extensions and catalog classes
+# for Spark 3.5 built with Scala 2.12, the versions used by the base image.
+ADD https://repo1.maven.org/maven2/org/apache/iceberg/iceberg-spark-runtime-3.5_2.12/${ICEBERG_VERSION}/iceberg-spark-runtime-3.5_2.12-${ICEBERG_VERSION}.jar /opt/spark/jars/
+RUN chmod 644 /opt/spark/jars/iceberg-spark-runtime-3.5_2.12-${ICEBERG_VERSION}.jar
+USER spark

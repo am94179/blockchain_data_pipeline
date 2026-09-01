@@ -1,0 +1,17 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.env
+# Tabular data and raw-data contents
+*.csv
+data/raw/*
+
+# Warehouse data files (the directories themselves remain on disk)
+warehouse/*.db/

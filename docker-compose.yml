@@ -1,0 +1,220 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: hive-metastore-postgres
+    environment:
+      POSTGRES_DB: hive_metastore
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d hive_metastore"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - hive-metastore-postgres:/var/lib/postgresql/data
+
+  hive-metastore:
+    build:
+      context: .
+      dockerfile: Dockerfile.hive-metastore
+    image: blockchain-hive-metastore:4.0.0
+    container_name: hive-metastore
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      HIVE_AUX_JARS_PATH: /opt/hive/lib/postgres.jar
+      DEFAULT_FS: file:///
+      HIVE_WAREHOUSE_PATH: /opt/spark/warehouse
+      SERVICE_OPTS: >
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://postgres:5432/hive_metastore
+        -Djavax.jdo.option.ConnectionUserName=hive
+        -Djavax.jdo.option.ConnectionPassword=hive
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/127.0.0.1/9083'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    ports:
+      - "9083:9083"
+    volumes:
+      - ./warehouse:/opt/spark/warehouse
+
+  trino:
+    image: trinodb/trino:483
+    container_name: trino
+    depends_on:
+      hive-metastore:
+        condition: service_healthy
+    ports:
+      - "8082:8080"
+    volumes:
+      - ./trino/catalog:/etc/trino/catalog:ro
+      - ./warehouse:/opt/spark/warehouse:ro
+
+  superset-postgres:
+    image: postgres:16
+    container_name: superset-postgres
+    environment:
+      POSTGRES_DB: superset
+      POSTGRES_USER: superset
+      POSTGRES_PASSWORD: "${SUPERSET_DB_PASSWORD:-superset}"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U superset -d superset"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - superset-postgres-data:/var/lib/postgresql/data
+
+  superset-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.superset
+    image: blockchain-superset:6.0.0
+    depends_on:
+      superset-postgres:
+        condition: service_healthy
+    environment:
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+      SUPERSET_DATABASE_URI: "postgresql+psycopg2://superset:${SUPERSET_DB_PASSWORD:-superset}@superset-postgres:5432/superset"
+      SUPERSET_SECRET_KEY: "${SUPERSET_SECRET_KEY:-local-development-secret-change-before-sharing}"
+      SUPERSET_ADMIN_USERNAME: "${SUPERSET_ADMIN_USERNAME:-admin}"
+      SUPERSET_ADMIN_PASSWORD: "${SUPERSET_ADMIN_PASSWORD:-admin}"
+      SUPERSET_ADMIN_EMAIL: "${SUPERSET_ADMIN_EMAIL:-admin@example.com}"
+    volumes:
+      - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+    command: >-
+      /bin/sh -c 'superset db upgrade && (superset fab create-admin --username "$$SUPERSET_ADMIN_USERNAME" --firstname Admin --lastname User --email "$$SUPERSET_ADMIN_EMAIL" --password "$$SUPERSET_ADMIN_PASSWORD" || true) && superset set-database-uri --database_name "Trino Iceberg" --uri "trino://superset@trino:8080/iceberg" && superset init'
+
+  superset-bootstrap:
+    build:
+      context: .
+      dockerfile: Dockerfile.superset
+    image: blockchain-superset:6.0.0
+    depends_on:
+      superset-init:
+        condition: service_completed_successfully
+      trino:
+        condition: service_healthy
+    environment:
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+      SUPERSET_DATABASE_URI: "postgresql+psycopg2://superset:${SUPERSET_DB_PASSWORD:-superset}@superset-postgres:5432/superset"
+      SUPERSET_SECRET_KEY: "${SUPERSET_SECRET_KEY:-local-development-secret-change-before-sharing}"
+    volumes:
+      - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+      - ./superset/bootstrap:/app/bootstrap:ro
+    command: /bin/sh -c 'python /app/bootstrap/gold_datasets.py && python /app/bootstrap/charts.py'
+
+  superset:
+    build:
+      context: .
+      dockerfile: Dockerfile.superset
+    image: blockchain-superset:6.0.0
+    container_name: superset
+    depends_on:
+      superset-bootstrap:
+        condition: service_completed_successfully
+      trino:
+        condition: service_healthy
+    environment:
+      SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+      SUPERSET_DATABASE_URI: "postgresql+psycopg2://superset:${SUPERSET_DB_PASSWORD:-superset}@superset-postgres:5432/superset"
+      SUPERSET_SECRET_KEY: "${SUPERSET_SECRET_KEY:-local-development-secret-change-before-sharing}"
+    ports:
+      - "8088:8088"
+    volumes:
+      - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+    command: superset run -h 0.0.0.0 -p 8088 --with-threads
+
+  warehouse-init:
+    image: blockchain-spark:3.5.5-iceberg-1.7.1
+    user: "0:0"
+    command: chown -R 185:185 /opt/spark/warehouse
+    volumes:
+      - ./warehouse:/opt/spark/warehouse
+
+  spark-master:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
+    image: blockchain-spark:3.5.5-iceberg-1.7.1
+    container_name: spark-master
+    configs:
+      - source: spark-log4j
+        target: /opt/spark/conf/log4j2.properties
+    environment:
+      SPARK_CONF_DIR: /opt/spark/conf
+      ICEBERG_CATALOG_TYPE: hive
+      ICEBERG_CATALOG_URI: thrift://hive-metastore:9083
+      ICEBERG_WAREHOUSE: /opt/spark/warehouse
+    depends_on:
+      hive-metastore:
+        condition: service_healthy
+      warehouse-init:
+        condition: service_completed_successfully
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+      --host spark-master
+      --port 7077
+      --webui-port 8080
+    ports:
+      - "7077:7077"
+      - "8080:8080"
+    volumes:
+      - ./spark:/opt/spark/app
+      - ./data:/opt/spark/data
+      - ./warehouse:/opt/spark/warehouse
+
+  spark-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
+    image: blockchain-spark:3.5.5-iceberg-1.7.1
+    container_name: spark-worker
+    configs:
+      - source: spark-log4j
+        target: /opt/spark/conf/log4j2.properties
+    environment:
+      SPARK_CONF_DIR: /opt/spark/conf
+      ICEBERG_CATALOG_TYPE: hive
+      ICEBERG_CATALOG_URI: thrift://hive-metastore:9083
+      ICEBERG_WAREHOUSE: /opt/spark/warehouse
+    depends_on:
+      spark-master:
+        condition: service_started
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      --webui-port 8081
+      spark://spark-master:7077
+    ports:
+      - "8081:8081"
+    volumes:
+      - ./spark:/opt/spark/app
+      - ./data:/opt/spark/data
+      - ./warehouse:/opt/spark/warehouse
+
+volumes:
+  hive-metastore-postgres:
+  superset-postgres-data:
+
+configs:
+  spark-log4j:
+    content: |
+      rootLogger.level = WARN
+      rootLogger.appenderRef.stdout.ref = STDOUT
+
+      appender.console.type = Console
+      appender.console.name = STDOUT
+      appender.console.layout.type = PatternLayout
+      appender.console.layout.pattern = %d{yy/MM/dd HH:mm:ss} %p %c{1}: %m%n
+
+      logger.spark.name = org.apache.spark
+      logger.spark.level = WARN
+
+      logger.hadoop.name = org.apache.hadoop
+      logger.hadoop.level = WARN

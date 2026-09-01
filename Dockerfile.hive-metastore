@@ -1,0 +1,10 @@
+FROM apache/hive:4.0.0
+USER root
+
+ARG POSTGRESQL_JDBC_VERSION=42.7.5
+
+# The official Hive image needs the PostgreSQL JDBC driver to use PostgreSQL
+# instead of its ephemeral embedded Derby metastore.
+ADD https://repo1.maven.org/maven2/org/postgresql/postgresql/${POSTGRESQL_JDBC_VERSION}/postgresql-${POSTGRESQL_JDBC_VERSION}.jar /opt/hive/lib/postgres.jar
+RUN chmod 644 /opt/hive/lib/postgres.jar
+USER hive
